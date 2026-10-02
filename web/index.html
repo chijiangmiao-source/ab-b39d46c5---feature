@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>航电密钥轮换复核台</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>航电密钥轮换复核台</h1>
+    <p class="subtitle">
+      双安全模块 · 穷尽保持控制端顺序的消息投递 / 断电 / 恢复交织 ·
+      规范状态＝持久纪元＋准备密钥＋已确认发布集合
+    </p>
+  </header>
+
+  <main>
+    <section class="card" aria-labelledby="h-input">
+      <h2 id="h-input">一、录入复核草稿</h2>
+
+      <div class="grid keys">
+        <label>旧密钥指纹
+          <input id="oldFp" type="text" spellcheck="false" placeholder="例如 FP-OLD-7F3A" />
+        </label>
+        <label>新密钥指纹
+          <input id="newFp" type="text" spellcheck="false" placeholder="例如 FP-NEW-9C1D" />
+        </label>
+      </div>
+
+      <div class="grid modules">
+        <fieldset class="modpanel" id="modpanel-0">
+          <legend>模块 1 持久初态</legend>
+          <label>模块标识 <input data-f="id" type="text" spellcheck="false" placeholder="M1" /></label>
+          <label>持久纪元
+            <select data-f="epoch">
+              <option value="-1">未激活</option>
+              <option value="0">旧密钥纪元</option>
+              <option value="1">新密钥纪元</option>
+            </select>
+          </label>
+          <label>准备密钥
+            <select data-f="prep">
+              <option value="-1">无</option>
+              <option value="0">旧密钥</option>
+              <option value="1">新密钥</option>
+            </select>
+          </label>
+          <label class="wide">已确认发布（逗号分隔 <code>发布标识:旧|新</code>）
+            <input data-f="confirmed" type="text" spellcheck="false" placeholder="ORD-1:旧, ORD-2:新" />
+          </label>
+        </fieldset>
+
+        <fieldset class="modpanel" id="modpanel-1">
+          <legend>模块 2 持久初态</legend>
+          <label>模块标识 <input data-f="id" type="text" spellcheck="false" placeholder="M2" /></label>
+          <label>持久纪元
+            <select data-f="epoch">
+              <option value="-1">未激活</option>
+              <option value="0">旧密钥纪元</option>
+              <option value="1">新密钥纪元</option>
+            </select>
+          </label>
+          <label>准备密钥
+            <select data-f="prep">
+              <option value="-1">无</option>
+              <option value="0">旧密钥</option>
+              <option value="1">新密钥</option>
+            </select>
+          </label>
+          <label class="wide">已确认发布（逗号分隔 <code>发布标识:旧|新</code>）
+            <input data-f="confirmed" type="text" spellcheck="false" placeholder="ORD-1:旧, ORD-2:新" />
+          </label>
+        </fieldset>
+      </div>
+
+      <label class="wide">指令序列（按控制端发起顺序，每行一条，至多 16 条）
+        <textarea id="prog" rows="10" spellcheck="false"
+placeholder="prepare M1 FP-OLD-7F3A&#10;activate M1&#10;issue M1 ORD-1&#10;recover M1&#10;# 也支持中文助记符：准备 / 激活 / 签发 / 恢复"></textarea>
+      </label>
+      <p class="hint">
+        助记符：<code>prepare|准备</code>、<code>activate|激活</code>、<code>issue|签发</code>、<code>recover|恢复</code>。
+        初态指纹处可直接填写完整指纹，也可写 <code>旧</code>/<code>新</code> 代指当前声明的指纹。
+      </p>
+
+      <div class="actions">
+        <button id="btn-run" class="primary" type="button">复核</button>
+        <button id="btn-clear" type="button">清空草稿与结论</button>
+        <button id="btn-stop" type="button" hidden>停止穷举</button>
+        <span id="counter" class="counter"></span>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="h-result">
+      <h2 id="h-result">二、复核结论</h2>
+      <div id="progress" class="progress" hidden></div>
+      <div id="errors" class="errors" hidden></div>
+      <div id="result" hidden></div>
+      <div id="placeholder" class="placeholder">尚未复核。穷举在浏览器 Worker 中执行，不占用页面交互。</div>
+    </section>
+  </main>
+
+  <footer>
+    <span>规范状态：持久纪元 · 准备密钥 · 已确认发布集合　|　等价前缀合并　|　最短违约见证按（模块, 指令, 事件）稳定排序</span>
+  </footer>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "name": "key-rotation-review",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "航电双安全模块密钥轮换：穷尽消息投递/断电/恢复交织的复核台",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test test/",
+    "verify": "node src/verify.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

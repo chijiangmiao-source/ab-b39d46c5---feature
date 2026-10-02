@@ -1,0 +1,41 @@
+# 航电密钥轮换复核台 Compose 编排
+#
+# 服务：
+#   web     长期运行的操作入口（页面 / + 健康响应 /healthz），宿主端口可配置：
+#             HOST_PORT=9090 docker compose up -d web
+#   verify  一次性复核服务：核心状态测试 → 静态构建检查 → 页面/健康 HTTP 冒烟，
+#             完成后以退出码结束（0 全部通过，1 存在失败）：
+#             docker compose run --rm verify
+#
+# 健康检查直接命中 /healthz。
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: key-rotation-review:latest
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+    ports:
+      # 宿主机端口可配置，默认 8080；容器内固定 8080
+      - "${HOST_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>{if(r.status!==200)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+    restart: unless-stopped
+
+  verify:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: key-rotation-review:latest
+    environment:
+      VERIFY_PORT: "8099"
+      # verify 不对外发布端口：冒烟在容器内对 127.0.0.1 自发自收
+    command: ["node", "src/verify.mjs"]
+    restart: "no"
