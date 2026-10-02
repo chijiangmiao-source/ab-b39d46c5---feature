@@ -1,17 +1,24 @@
 // 航电密钥轮换复核 —— 核心状态模型与穷尽交织搜索
 //
-// 两枚独立安全模块（控制端到模块为按发起顺序的 FIFO 通道）处理四类指令：
-//   prepare <模块> <密钥指纹>  准备（持久暂存）一枚纪元密钥
-//   activate <模块>           将已暂存密钥提交为持久纪元
-//   issue   <模块> <发布标识> 以当前持久纪元密钥确认一份发布令
-//   recover <模块>            断电恢复：仅重放已落盘记录
+// 两枚独立安全模块（控制端到模块为按发起顺序的 FIFO 通道）处理五类指令：
+//   prepare   <模块> <密钥指纹>          准备（持久暂存）一枚纪元密钥
+//   activate  <模块>                    将已暂存密钥提交为持久纪元
+//   issue     <模块> <发布标识>          以当前持久纪元密钥确认一份发布令
+//   authorize <模块> <发布标识> <密钥指纹> 为该模块的该发布令持久绑定允许签发的密钥
+//   recover   <模块>                    断电恢复：仅重放已落盘记录
+//
+// 授权语义：某发布令一旦在某模块存在落盘授权，该模块仅在“已持久激活授权密钥且
+// 存在匹配的持久授权”时才能形成该发布令的确认；从未配置授权的发布令继续沿用原签发
+// 规则（当前持久纪元即签发密钥）。授权本身是持久记录：写入前断电不生效，写入后断电
+// 的恢复仅从落盘授权重放；迟到/重复确认同样不得改写模块记录。
 //
 // 每条指令的生命周期：投递 -> 持久写入 -> 确认；三个边界都可能断电：
 //   写入前断电：未落盘，指令丢失；写入后确认前断电：已落盘未确认，恢复后重放，
 //   重传/迟到确认不得改变记录；确认后断电：记录已生效，等待恢复后续做。
 //
-// 模块规范状态（canonical state）仅由三部分构成：
-//   持久纪元 ep(-1 未激活 / 0 旧 / 1 新)、准备密钥 prep、已确认发布集合 bits[id]
+// 模块规范状态（canonical state）仅由四部分构成：
+//   持久纪元 ep(-1 未激活 / 0 旧 / 1 新)、准备密钥 prep、
+//   持久授权 authz(发布标识 -> 0 旧 / 1 新)、已确认发布集合 bits[id]
 // 等价前缀（同调度位置、同规范状态）在穷举中合并。
 
 export const NONE = -1;
@@ -41,6 +48,7 @@ export const EVT_VERB = Object.freeze({
   prepare: '准备',
   activate: '激活',
   issue: '签发',
+  authorize: '授权',
   recover: '恢复',
 });
 
@@ -48,10 +56,12 @@ const OP_ALIASES = Object.freeze({
   prepare: 'prepare',
   activate: 'activate',
   issue: 'issue',
+  authorize: 'authorize',
   recover: 'recover',
   准备: 'prepare',
   激活: 'activate',
   签发: 'issue',
+  授权: 'authorize',
   恢复: 'recover',
 });
 
@@ -97,7 +107,7 @@ export function parseModel(raw) {
   const idRe = /^[\w.\-]+$/;
 
   function parseInitial(m, label) {
-    const init = { ep: NONE, prep: NONE, bits: new Map() };
+    const init = { ep: NONE, prep: NONE, authz: new Map(), bits: new Map() };
     if (!ids[label]) return init;
     const ep = (m.epoch ?? '-1').toString();
     if (ep === '0' || ep === '1') init.ep = Number(ep);
@@ -160,7 +170,7 @@ export function parseModel(raw) {
     const where = `第 ${lineNo} 行指令“${line}”`;
     if (!op) {
       errors.push(
-        `${where}：未知指令类型“${opToken}”，应为 prepare/activate/issue/recover（准备/激活/签发/恢复）。`,
+        `${where}：未知指令类型“${opToken}”，应为 prepare/activate/issue/authorize/recover（准备/激活/签发/授权/恢复）。`,
       );
       continue;
     }
@@ -175,10 +185,11 @@ export function parseModel(raw) {
       continue;
     }
     const arg = tokens[2] ?? '';
-    const extra = tokens[3];
+    const arg2 = tokens[3] ?? '';
+    const extra = tokens[4];
     const rec = { idx: instructions.length, lineNo, op, target: mi, arg: null, text: line };
     if (op === 'prepare') {
-      if (!arg || extra) {
+      if (!arg || tokens[3]) {
         errors.push(`${where}：准备指令格式应为 prepare <模块> <密钥指纹>。`);
       } else {
         const k = keyOf(resolveFp(arg));
@@ -187,17 +198,58 @@ export function parseModel(raw) {
         rec.arg = k;
       }
     } else if (op === 'issue') {
-      if (!arg || extra) {
+      if (!arg || tokens[3]) {
         errors.push(`${where}：签发指令格式应为 issue <模块> <发布标识>。`);
       } else if (!idRe.test(arg)) {
         errors.push(`${where}：发布标识“${arg}”含非法字符（允许字母数字 _ . -）。`);
       } else {
         rec.arg = internId(arg);
       }
+    } else if (op === 'authorize') {
+      // authorize <模块> <发布标识> <密钥指纹>：落盘后该发布令只能由授权密钥确认
+      if (!arg || !arg2 || extra) {
+        errors.push(`${where}：授权指令格式应为 authorize <模块> <发布标识> <密钥指纹>。`);
+      } else {
+        let idOk = true;
+        if (!idRe.test(arg)) {
+          errors.push(`${where}：发布标识“${arg}”含非法字符（允许字母数字 _ . -）。`);
+          idOk = false;
+        }
+        const k = keyOf(resolveFp(arg2));
+        if (k === NONE)
+          errors.push(
+            `${where}：授权密钥指纹“${arg2}”不是已声明的旧或新密钥（授权只能绑定已声明的纪元密钥）。`,
+          );
+        if (idOk && k !== NONE) rec.arg = { id: internId(arg), key: k };
+      }
     } else if (arg) {
       errors.push(`${where}：${op === 'activate' ? '激活' : '恢复'}指令不接受额外参数。`);
     }
     instructions.push(rec);
+  }
+
+  // 授权冲突一次性校验：同一模块同一发布令不得出现两条授权指令
+  // （相同指纹＝重复授权；不同指纹＝改绑不同指纹）。
+  const authzSeen = [new Map(), new Map()];
+  for (const ins of instructions) {
+    if (ins.op !== 'authorize' || !ins.arg) continue;
+    const { id, key } = ins.arg;
+    const seen = authzSeen[ins.target];
+    const prev = seen.get(id);
+    if (prev) {
+      const pid = idTable[id];
+      if (prev.key === key) {
+        errors.push(
+          `第 ${ins.lineNo} 行：模块“${ids[ins.target]}”对发布令“${pid}”的授权重复（第 ${prev.lineNo} 行已绑定${prev.key === 0 ? '旧' : '新'}密钥 ${[oldFp, newFp][key]}）；同一模块同一发布令只需授权一次。`,
+        );
+      } else {
+        errors.push(
+          `第 ${ins.lineNo} 行：模块“${ids[ins.target]}”对发布令“${pid}”改绑了与第 ${prev.lineNo} 行不同的密钥指纹（${[oldFp, newFp][prev.key]} → ${[oldFp, newFp][key]}）；已授权发布令不得改绑其他密钥。`,
+        );
+      }
+    } else {
+      seen.set(id, { key, lineNo: ins.lineNo });
+    }
   }
 
   // 恢复前无故障：恢复指令之前，同模块必须存在可断电的在先指令。
@@ -213,8 +265,11 @@ export function parseModel(raw) {
 
   if (errors.length) return { errors };
 
-  // 统一补齐每个模块的已确认位向量
+  // 统一补齐每个模块的持久授权数组与已确认位向量（按发布标识编号对齐）
   for (const init of inits) {
+    const az = new Array(idTable.length).fill(NONE);
+    for (const [n, k] of init.authz) az[n] = k;
+    init.authz = az;
     const arr = new Array(idTable.length).fill(0);
     for (const [n, b] of init.bits) arr[n] = b;
     init.bits = arr;
@@ -240,7 +295,9 @@ export function parseModel(raw) {
 function canonKey(c) {
   const parts = [];
   for (let i = 0; i < c.bits.length; i++) if (c.bits[i]) parts.push(`${i}:${c.bits[i]}`);
-  return `${c.ep === NONE ? 2 : c.ep}/${c.prep === NONE ? 2 : c.prep}/${parts.join(',')}`;
+  const authz = [];
+  for (let i = 0; i < c.authz.length; i++) if (c.authz[i] !== NONE) authz.push(`${i}:${c.authz[i]}`);
+  return `${c.ep === NONE ? 2 : c.ep}/${c.prep === NONE ? 2 : c.prep}/A{${authz.join(',')}}/B{${parts.join(',')}}`;
 }
 
 function stateKey(s) {
@@ -265,8 +322,18 @@ function initialState(model) {
     // 各指令断电后可能晚到的确认（不论其写入是否落盘）；恢复后消化，必须全部幂等
     late: [[], []],
     canon: [
-      { ep: model.inits[0].ep, prep: model.inits[0].prep, bits: model.inits[0].bits.slice() },
-      { ep: model.inits[1].ep, prep: model.inits[1].prep, bits: model.inits[1].bits.slice() },
+      {
+        ep: model.inits[0].ep,
+        prep: model.inits[0].prep,
+        authz: model.inits[0].authz.slice(),
+        bits: model.inits[0].bits.slice(),
+      },
+      {
+        ep: model.inits[1].ep,
+        prep: model.inits[1].prep,
+        authz: model.inits[1].authz.slice(),
+        bits: model.inits[1].bits.slice(),
+      },
     ],
   };
 }
@@ -278,14 +345,15 @@ function cloneState(s) {
     infl: [s.infl[0] ? { ...s.infl[0] } : null, s.infl[1] ? { ...s.infl[1] } : null],
     late: [s.late[0].slice(), s.late[1].slice()],
     canon: [
-      { ep: s.canon[0].ep, prep: s.canon[0].prep, bits: s.canon[0].bits },
-      { ep: s.canon[1].ep, prep: s.canon[1].prep, bits: s.canon[1].bits },
+      { ep: s.canon[0].ep, prep: s.canon[0].prep, authz: s.canon[0].authz, bits: s.canon[0].bits },
+      { ep: s.canon[1].ep, prep: s.canon[1].prep, authz: s.canon[1].authz, bits: s.canon[1].bits },
     ],
   };
 }
 
 function writeEffect(ins, canon) {
-  // 落盘对规范状态的效果；无效应写入（重复暂存/激活、无密钥激活、未激活签发、恢复）返回 false。
+  // 落盘对规范状态的效果；无效应写入（重复暂存/激活、无密钥激活、未激活签发、
+  // 授权密钥不匹配的签发、重复授权、恢复）返回 false。
   switch (ins.op) {
     case 'prepare':
       if (canon.prep === ins.arg) return false;
@@ -295,11 +363,23 @@ function writeEffect(ins, canon) {
       if (canon.prep === NONE || canon.ep === canon.prep) return false;
       canon.ep = canon.prep;
       return true;
-    case 'issue':
+    case 'issue': {
       if (canon.ep === NONE) return false; // 未持久激活：签发不成立
+      const bound = canon.authz[ins.arg];
+      // 该发布令已存在持久授权：仅当持久激活的纪元密钥与授权指纹一致时确认才成立
+      if (bound !== NONE && bound !== canon.ep) return false;
       canon.bits = canon.bits.slice();
       canon.bits[ins.arg] |= 1 << canon.ep;
       return true;
+    }
+    case 'authorize': {
+      // 持久绑定允许签发的密钥；重复授权（含解析层漏网者）为无效应写入
+      const { id, key } = ins.arg;
+      if (canon.authz[id] === key) return false;
+      canon.authz = canon.authz.slice();
+      canon.authz[id] = key;
+      return true;
+    }
     case 'recover':
       return false; // 规范状态本就等于落盘记录的重放结果
   }
@@ -575,7 +655,13 @@ export function explore(model, onProgress) {
   const last = steps[steps.length - 1];
   const conflictKeys = [0, 1].map((m) => {
     const entry = last.modules[m].confirmed.find((x) => x.idIdx === idIdx);
-    return { module: m, bits: entry.bits };
+    const az = last.modules[m].authz.find((x) => x.idIdx === idIdx);
+    return {
+      module: m,
+      bits: entry.bits,
+      epoch: last.modules[m].epoch,
+      authzKey: az ? az.key : NONE, // NONE 表示该模块从未为该发布令落盘授权
+    };
   });
 
   return {
@@ -593,6 +679,9 @@ function snapshot(model, s, action) {
     mode: s.mode[m] === 0 ? 'online' : 'down',
     epoch: s.canon[m].ep,
     prep: s.canon[m].prep,
+    authz: s.canon[m].authz
+      .map((key, idIdx) => ({ idIdx, id: model.idTable[idIdx], key }))
+      .filter((x) => x.key !== NONE),
     confirmed: s.canon[m].bits
       .map((bits, idIdx) => ({ idIdx, id: model.idTable[idIdx], bits }))
       .filter((x) => x.bits),

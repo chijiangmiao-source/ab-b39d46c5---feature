@@ -128,7 +128,7 @@ function isLexicographicallyMinimal(d, chosen) {
     mode: [0, 0],
     infl: [null, null],
     late: [[], []],
-    canon: model.inits.map((c) => ({ ep: c.ep, prep: c.prep, bits: c.bits.slice() })),
+    canon: model.inits.map((c) => ({ ep: c.ep, prep: c.prep, authz: c.authz.slice(), bits: c.bits.slice() })),
   };
   if (badAt(s0)) return chosen.length === 0;
   const nodeKey = (s) =>
@@ -137,7 +137,7 @@ function isLexicographicallyMinimal(d, chosen) {
       s.mode,
       s.infl,
       s.late,
-      s.canon.map((c) => [c.ep, c.prep, c.bits]),
+      s.canon.map((c) => [c.ep, c.prep, c.authz, c.bits]),
     ]);
   // 分层 BFS，父边记录完整；不合并等价前缀（保留所有交织链）
   let layer = [{ s: s0, path: [] }];
@@ -233,8 +233,17 @@ function edgesOf(s, model) {
             else if (ins.op === 'activate' && n.canon[m].prep !== NONE)
               n.canon[m].ep = n.canon[m].prep;
             else if (ins.op === 'issue' && n.canon[m].ep !== NONE) {
-              n.canon[m].bits = n.canon[m].bits.slice();
-              n.canon[m].bits[ins.arg] |= 1 << n.canon[m].ep;
+              const bound = n.canon[m].authz[ins.arg];
+              if (bound === undefined || bound === NONE || bound === n.canon[m].ep) {
+                n.canon[m].bits = n.canon[m].bits.slice();
+                n.canon[m].bits[ins.arg] |= 1 << n.canon[m].ep;
+              }
+            } else if (ins.op === 'authorize') {
+              const { id, key } = ins.arg;
+              if (n.canon[m].authz[id] !== key) {
+                n.canon[m].authz = n.canon[m].authz.slice();
+                n.canon[m].authz[id] = key;
+              }
             }
             if (ins.op === 'recover') n.mode[m] = 0;
             n.infl[m] = { i: inf.i, ph: 1 };
@@ -273,7 +282,7 @@ function clone(s, mut) {
     mode: s.mode.slice(),
     infl: s.infl.map((x) => (x ? { ...x } : null)),
     late: s.late.map((x) => x.slice()),
-    canon: s.canon.map((c) => ({ ep: c.ep, prep: c.prep, bits: c.bits })),
+    canon: s.canon.map((c) => ({ ep: c.ep, prep: c.prep, authz: c.authz.slice(), bits: c.bits })),
   };
   mut(n);
   return n;
@@ -370,7 +379,7 @@ function dupAckReachable(d) {
     mode: [0, 0],
     infl: [null, null],
     late: [[], []],
-    canon: model.inits.map((c) => ({ ep: c.ep, prep: c.prep, bits: c.bits.slice() })),
+    canon: model.inits.map((c) => ({ ep: c.ep, prep: c.prep, authz: c.authz.slice(), bits: c.bits.slice() })),
   };
   const seen = new Set();
   const stack = [[s0, 0]];
@@ -382,7 +391,7 @@ function dupAckReachable(d) {
       mode: s.mode,
       infl: s.infl,
       late: s.late,
-      bits: s.canon.map((c) => [c.ep, c.prep, c.bits]),
+      bits: s.canon.map((c) => [c.ep, c.prep, c.authz, c.bits]),
     });
     if (seen.has(k)) continue;
     seen.add(k);
@@ -507,6 +516,8 @@ activate M2`,
       (m) =>
         s.canon[m].ep === t.canon[m].ep &&
         s.canon[m].prep === t.canon[m].prep &&
+        s.canon[m].authz.length === t.canon[m].authz.length &&
+        s.canon[m].authz.every((b, i) => b === t.canon[m].authz[i]) &&
         s.canon[m].bits.length === t.canon[m].bits.length &&
         s.canon[m].bits.every((b, i) => b === t.canon[m].bits[i]),
     );
@@ -516,14 +527,14 @@ activate M2`,
       s.mode,
       s.infl,
       s.late,
-      s.canon.map((c) => [c.ep, c.prep, c.bits]),
+      s.canon.map((c) => [c.ep, c.prep, c.authz, c.bits]),
     ]);
   const s0 = {
     h: [0, 0],
     mode: [0, 0],
     infl: [null, null],
     late: [[], []],
-    canon: model.inits.map((c) => ({ ep: c.ep, prep: c.prep, bits: c.bits.slice() })),
+    canon: model.inits.map((c) => ({ ep: c.ep, prep: c.prep, authz: c.authz.slice(), bits: c.bits.slice() })),
   };
   let dupEdges = 0;
   const seen = new Set([keyOf(s0)]);
@@ -588,4 +599,349 @@ issue M2 Z1`,
   assert.equal(r.report.violation, false);
   // 指令物理行号保留：#5(2) 签发实际在第 5 行
   assert.equal(r.model.instructions[2].lineNo, 5);
+});
+
+// ---------- 授权（authorize）指令 ----------
+
+function reachableStates(model) {
+  // 借助测试内独立迁移模型 edgesOf 枚举全部可达规范状态；与 core 的等价前缀合并
+  // 使用同一键（调度位置 + 断电态 + 在途槽 + 规范状态；late 迟到确认队列不入键，
+  // 因其迁移对规范状态为自环），避免无合并枚举组合爆炸。
+  const s0 = {
+    h: [0, 0],
+    mode: [0, 0],
+    infl: [null, null],
+    late: [[], []],
+    canon: model.inits.map((c) => ({ ep: c.ep, prep: c.prep, authz: c.authz.slice(), bits: c.bits.slice() })),
+  };
+  const key = (s) =>
+    JSON.stringify([s.h, s.mode, s.infl, s.canon.map((c) => [c.ep, c.prep, c.authz, c.bits])]);
+  const out = [];
+  const seen = new Set();
+  const stack = [s0];
+  while (stack.length) {
+    const s = stack.pop();
+    const k = key(s);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(s);
+    for (const e of edgesOf(s, model)) stack.push(e.ns);
+  }
+  return out;
+}
+
+test('授权匹配可确认；模块换新密钥后，未匹配持久授权的签发不成立（阻止未授权签发）', () => {
+  const d = draft({
+    m1: mod('M1'),
+    m2: mod('M2'),
+    prog: `
+authorize M1 RO ${OLD}
+prepare M1 ${OLD}
+activate M1
+issue M1 RO
+prepare M1 ${NEW}
+activate M1
+issue M1 RO
+prepare M2 ${NEW}
+activate M2
+issue M2 RO
+`,
+  });
+  const r = analyze(d);
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.equal(r.report.violation, true);
+  assert.deepEqual(r.report.conflictKeys.map((c) => c.bits).sort(), [1, 2]);
+  // 违约瞬间 M1 持旧密钥授权并以旧纪元确认，M2 无授权、以新纪元确认
+  const ck = r.report.conflictKeys;
+  assert.equal(ck[0].authzKey, 0);
+  assert.equal(ck[0].epoch, 0);
+  assert.equal(ck[1].authzKey, -1);
+  assert.equal(ck[1].epoch, 1);
+  // 见证逐步状态中可见 M1 的持久授权
+  assert.ok(
+    r.report.steps.some((st) => st.modules[0].authz.some((a) => a.id === 'RO' && a.key === 0)),
+  );
+  // 全状态不变量：M1 对 RO 持有旧密钥授权时，确认位永不出现新密钥位
+  const { model } = parseModel(d);
+  const idRO = model.idTable.indexOf('RO');
+  let blockedWitness = 0;
+  for (const s of reachableStates(model)) {
+    const az = s.canon[0].authz[idRO];
+    if (az === 0) assert.equal(s.canon[0].bits[idRO] & 2, 0);
+    // 存在“已持久激活新密钥、授权仍旧、RO 仅持旧确认位”的状态：第二次签发被阻止
+    if (az === 0 && s.canon[0].ep === 1 && s.canon[0].bits[idRO] === 1) blockedWitness += 1;
+  }
+  assert.ok(blockedWitness > 0, '应存在换新密钥后授权签发被阻止的可达状态');
+});
+
+test('授权写入前断电不生效：恢复不重放未落盘授权，发布令回落到原签发规则', () => {
+  const d = draft({
+    m1: mod('M1'),
+    m2: mod('M2'),
+    prog: `
+authorize M1 RO ${OLD}
+recover M1
+prepare M1 ${NEW}
+activate M1
+issue M1 RO
+`,
+  });
+  const r = analyze(d);
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  const { model } = parseModel(d);
+  const idRO = model.idTable.indexOf('RO');
+  // 确定性重放独立模型：投递授权 → 写入前断电 → 恢复指令投递+落盘重放。
+  // 未落盘授权不得被重放：恢复在线后授权位仍为 NONE。
+  const lost = replay(model, [
+    { m: 0, i: 0, kind: E.DELIVER },
+    { m: 0, i: 0, kind: E.FAULT_PRE },
+    { m: 0, i: 1, kind: E.DELIVER },
+    { m: 0, i: 1, kind: E.WRITE },
+  ]);
+  assert.equal(lost.mode[0], 0);
+  assert.equal(lost.canon[0].authz[idRO], NONE);
+  // 同一可达空间内：授权丢失后激活新密钥，签发按原规则以新密钥成立
+  const states = reachableStates(model);
+  assert.ok(
+    states.some((s) => s.canon[0].authz[idRO] === NONE && (s.canon[0].bits[idRO] & 2) !== 0),
+    '写入前断电应使授权丢失，恢复后新密钥签发按原规则成立',
+  );
+  // 反之：授权在盘上时，新密钥确认位永不出现
+  assert.ok(
+    states.every((s) => s.canon[0].authz[idRO] !== 0 || (s.canon[0].bits[idRO] & 2) === 0),
+  );
+});
+
+test('授权写入后断电：恢复只从落盘授权重放，新密钥签发仍被阻止', () => {
+  const d = draft({
+    m1: mod('M1'),
+    m2: mod('M2'),
+    prog: `
+authorize M1 RO ${OLD}
+recover M1
+prepare M1 ${NEW}
+activate M1
+issue M1 RO
+`,
+  });
+  const { model } = parseModel(d);
+  const idRO = model.idTable.indexOf('RO');
+  // 确定性重放：授权落盘 → 写入后确认前断电 → 恢复仅重放落盘记录；
+  // 随后激活新密钥并签发：授权仍在且为旧密钥，签发不得产生确认位。
+  const s = replay(model, [
+    { m: 0, i: 0, kind: E.DELIVER },
+    { m: 0, i: 0, kind: E.WRITE },
+    { m: 0, i: 0, kind: E.FAULT_POST },
+    { m: 0, i: 1, kind: E.DELIVER },
+    { m: 0, i: 1, kind: E.WRITE },
+    { m: 0, i: 1, kind: E.ACK },
+    { m: 0, i: 2, kind: E.DELIVER },
+    { m: 0, i: 2, kind: E.WRITE },
+    { m: 0, i: 2, kind: E.ACK },
+    { m: 0, i: 3, kind: E.DELIVER },
+    { m: 0, i: 3, kind: E.WRITE },
+    { m: 0, i: 3, kind: E.ACK },
+    { m: 0, i: 4, kind: E.DELIVER },
+    { m: 0, i: 4, kind: E.WRITE },
+  ]);
+  assert.equal(s.mode[0], 0);
+  assert.equal(s.canon[0].authz[idRO], 0, '落盘授权应被恢复重放');
+  assert.equal(s.canon[0].ep, 1);
+  assert.equal(s.canon[0].bits[idRO], 0, '授权密钥不匹配时签发不得形成确认');
+  // 迟到/重复确认随后到达仍不改写记录
+  const dup = s.late[0].length
+    ? edgesOf(s, model).find((e) => e.kind === E.DUP_ACK)
+    : null;
+  if (dup) {
+    assert.equal(dup.ns.canon[0].authz[idRO], 0);
+    assert.equal(dup.ns.canon[0].bits[idRO], 0);
+  }
+});
+
+function replay(model, picks) {
+  // 按 (模块, 指令序号, 事件) 在独立迁移模型上确定性重放一条事件链
+  let s = {
+    h: [0, 0],
+    mode: [0, 0],
+    infl: [null, null],
+    late: [[], []],
+    canon: model.inits.map((c) => ({ ep: c.ep, prep: c.prep, authz: c.authz.slice(), bits: c.bits.slice() })),
+  };
+  for (const p of picks) {
+    const e = edgesOf(s, model).find(
+      (x) => x.m === p.m && x.i === p.i && x.kind === p.kind,
+    );
+    assert.ok(e, `重放断在 ${JSON.stringify(p)}`);
+    s = e.ns;
+  }
+  return s;
+}
+
+test('授权场景的幂等不变量：迟到/重复确认不改写授权映射与确认记录', () => {
+  const d = draft({
+    m1: mod('M1', { epoch: '0' }),
+    m2: mod('M2'),
+    prog: `authorize M1 RO ${OLD}
+recover M1
+prepare M1 ${NEW}
+activate M1
+issue M1 RO
+recover M1`,
+  });
+  const { model } = parseModel(d);
+  const same = (a, b) =>
+    [0, 1].every(
+      (m) =>
+        a.canon[m].ep === b.canon[m].ep &&
+        a.canon[m].prep === b.canon[m].prep &&
+        a.canon[m].authz.every((x, i) => x === b.canon[m].authz[i]) &&
+        a.canon[m].bits.every((x, i) => x === b.canon[m].bits[i]),
+    );
+  let dupEdges = 0;
+  for (const s of reachableStates(model)) {
+    for (const e of edgesOf(s, model)) {
+      if (e.kind !== E.DUP_ACK) continue;
+      dupEdges += 1;
+      assert.ok(same(s, e.ns), '迟到/重复确认改变了含授权的规范状态');
+    }
+  }
+  // 等价前缀合并可能吸收部分 late 队列状态；用含 late 的全状态受限 DFS 确认该场景
+  // 穷举中确实枚举了迟到/重复确认事件。
+  assert.ok(dupEdges > 0 || dupAckReachable(d), '授权场景穷举中应实际出现迟到/重复确认事件');
+});
+
+test('授权映射进入规范状态：含授权的最短见证长度与字典序由独立模型校验', () => {
+  const d = draft({
+    m1: mod('A', { epoch: '0' }),
+    m2: mod('B'),
+    prog: `authorize A P ${OLD}
+issue A P
+prepare B ${NEW}
+activate B
+issue B P`,
+  });
+  const r = analyze(d);
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.equal(r.report.violation, true);
+  const acts = r.report.witnessActions;
+  // A 侧：授权 3 步放行槽位 + 签发止于落盘 2 步 = 5；B 侧 3 指令 = 8；共 13
+  assert.equal(acts.length, 13);
+  assert.ok(isLexicographicallyMinimal(d, acts));
+});
+
+test('不同模块可各自授权不同密钥；以各自纪元共同确认同一发布仍判违约', () => {
+  const d = draft({
+    m1: mod('M1'),
+    m2: mod('M2'),
+    prog: `
+authorize M1 RO ${OLD}
+prepare M1 ${OLD}
+activate M1
+issue M1 RO
+authorize M2 RO ${NEW}
+prepare M2 ${NEW}
+activate M2
+issue M2 RO
+`,
+  });
+  const r = analyze(d);
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.equal(r.report.violation, true);
+  assert.deepEqual(r.report.conflictKeys.map((c) => c.bits).sort(), [1, 2]);
+  assert.deepEqual(r.report.conflictKeys.map((c) => c.authzKey).sort(), [0, 1]);
+});
+
+test('双方均授权并以新密钥确认时安全，终态快照含持久授权', () => {
+  const d = draft({
+    m1: mod('M1'),
+    m2: mod('M2'),
+    prog: `
+authorize M1 RO ${NEW}
+prepare M1 ${NEW}
+activate M1
+issue M1 RO
+authorize M2 RO ${NEW}
+prepare M2 ${NEW}
+activate M2
+issue M2 RO
+`,
+  });
+  const r = analyze(d);
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.equal(r.report.violation, false);
+  for (const m of [0, 1]) {
+    const ms = r.report.terminalSnapshot.modules[m];
+    assert.ok(ms.authz.some((a) => a.id === 'RO' && a.key === 1));
+    assert.equal(ms.confirmed.find((a) => a.id === 'RO').bits, 2);
+  }
+});
+
+test('中文助记符“授权”可用', () => {
+  const d = draft({
+    m1: mod('左'),
+    m2: mod('右'),
+    prog: `
+授权 左 F1 ${NEW}
+准备 左 ${NEW}
+激活 左
+签发 左 F1
+授权 右 F1 ${NEW}
+准备 右 ${NEW}
+激活 右
+签发 右 F1
+`,
+  });
+  const r = analyze(d);
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.equal(r.report.violation, false);
+});
+
+test('校验：重复授权、改绑异指纹、未知指纹、无效目标、格式错误与超限一次性指出', () => {
+  const overflow = Array.from({ length: 17 }, (_, i) => `issue M1 P${i}`).join('\n');
+  const d = draft({
+    m1: mod('M1'),
+    m2: mod('M2'),
+    prog: `
+authorize M1 RO ${OLD}
+authorize M1 RO ${OLD}
+authorize M1 RO ${NEW}
+authorize M2 RO FP-UNKNOWN
+authorize ZZ RO ${OLD}
+authorize M1
+authorize M1 R2 ${OLD} extra
+${overflow}
+`,
+  });
+  const r = analyze(d);
+  assert.equal(r.ok, false);
+  const msg = r.errors.join('\n');
+  for (const re of [
+    /授权重复/,
+    /改绑/,
+    /授权密钥指纹“FP-UNKNOWN”不是已声明的旧或新密钥/,
+    /目标模块“ZZ”/,
+    /授权指令格式应为/,
+    /超过上限 16/,
+  ]) {
+    assert.match(msg, re, `缺少错误：${re}；实际：\n${msg}`);
+  }
+});
+
+test('兼容：未使用授权指令的既有草稿结论不变，规范状态中授权为空', () => {
+  const d = draft({
+    m1: mod('M1'),
+    m2: mod('M2'),
+    prog: `
+prepare M1 ${NEW}
+activate M1
+issue M1 OK
+prepare M2 ${NEW}
+activate M2
+issue M2 OK
+`,
+  });
+  const r = analyze(d);
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.equal(r.report.violation, false);
+  assert.deepEqual(r.report.terminalSnapshot.modules.map((m) => m.authz.length), [0, 0]);
 });

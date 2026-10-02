@@ -11,7 +11,7 @@
     <h1>航电密钥轮换复核台</h1>
     <p class="subtitle">
       双安全模块 · 穷尽保持控制端顺序的消息投递 / 断电 / 恢复交织 ·
-      规范状态＝持久纪元＋准备密钥＋已确认发布集合
+      规范状态＝持久纪元＋准备密钥＋持久授权＋已确认发布集合
     </p>
   </header>
 
@@ -76,10 +76,13 @@
 
       <label class="wide">指令序列（按控制端发起顺序，每行一条，至多 16 条）
         <textarea id="prog" rows="10" spellcheck="false"
-placeholder="prepare M1 FP-OLD-7F3A&#10;activate M1&#10;issue M1 ORD-1&#10;recover M1&#10;# 也支持中文助记符：准备 / 激活 / 签发 / 恢复"></textarea>
+placeholder="prepare M1 FP-OLD-7F3A&#10;activate M1&#10;authorize M1 ORD-1 FP-OLD-7F3A&#10;issue M1 ORD-1&#10;recover M1&#10;# 也支持中文助记符：准备 / 激活 / 签发 / 授权 / 恢复"></textarea>
       </label>
       <p class="hint">
-        助记符：<code>prepare|准备</code>、<code>activate|激活</code>、<code>issue|签发</code>、<code>recover|恢复</code>。
+        助记符：<code>prepare|准备</code>、<code>activate|激活</code>、<code>issue|签发</code>、
+        <code>authorize|授权</code>、<code>recover|恢复</code>。
+        授权写法 <code>authorize &lt;模块&gt; &lt;发布标识&gt; &lt;密钥指纹&gt;</code>（也可写 <code>旧</code>/<code>新</code> 代指）；
+        发布令一旦落盘授权，仅当模块持久激活授权密钥时签发才能形成确认，未授权的发布令沿用原签发规则。
         初态指纹处可直接填写完整指纹，也可写 <code>旧</code>/<code>新</code> 代指当前声明的指纹。
       </p>
 
@@ -101,7 +104,7 @@ placeholder="prepare M1 FP-OLD-7F3A&#10;activate M1&#10;issue M1 ORD-1&#10;recov
   </main>
 
   <footer>
-    <span>规范状态：持久纪元 · 准备密钥 · 已确认发布集合　|　等价前缀合并　|　最短违约见证按（模块, 指令, 事件）稳定排序</span>
+    <span>规范状态：持久纪元 · 准备密钥 · 持久授权 · 已确认发布集合　|　等价前缀合并　|　最短违约见证按（模块, 指令, 事件）稳定排序</span>
   </footer>
 
   <script type="module" src="/app.js"></script>

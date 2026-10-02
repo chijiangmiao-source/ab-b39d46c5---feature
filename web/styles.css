@@ -128,6 +128,9 @@ td.stepno { text-align: right; color: var(--muted); width: 42px; }
 .badge.old { background: #3a3217; color: #e8d28a; }
 .badge.new { background: #16333a; color: #8fddea; }
 .badge.both { background: #3a2140; color: #d9a5e8; }
+.badge.authz { border: 1px dashed currentColor; background: transparent; }
+.authzrow { margin-top: 4px; }
+.rowlbl { color: var(--muted); font-size: 11px; }
 .badge.down { background: #3d2b2b; color: #e8a0a0; }
 .badge.online { background: #1c3324; color: #9fe0b6; }
 .conf { margin-top: 4px; }

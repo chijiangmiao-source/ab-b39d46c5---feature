@@ -149,6 +149,16 @@ function confirmedBitsHtml(model, confirmed) {
     .join(' ');
 }
 
+function authzHtml(model, authz) {
+  if (!authz.length) return '<span class="epochnone">无授权</span>';
+  return authz
+    .map((a) => {
+      const which = a.key === 0 ? 'old' : 'new';
+      return `<span class="badge authz ${which}">${escapeHtml(a.id)}→仅${a.key === 0 ? '旧' : '新'} ${escapeHtml(model.keys[a.key])}</span>`;
+    })
+    .join(' ');
+}
+
 function moduleStateHtml(model, ms) {
   const ep = epochLabel(model, ms.epoch);
   const prep = ms.prep === -1 ? '无' : ms.prep === 0 ? '旧' : '新';
@@ -158,7 +168,8 @@ function moduleStateHtml(model, ms) {
   return `<div class="modstate">${modeBadge}
     <span class="epoch ${ep.cls}">${ep.text}</span>
     <span class="epochnone">准备:${prep}</span>
-    <div class="conf">${confirmedBitsHtml(model, ms.confirmed)}</div></div>`;
+    <div class="authzrow"><span class="rowlbl">持久授权</span> ${authzHtml(model, ms.authz)}</div>
+    <div class="conf"><span class="rowlbl">确认</span> ${confirmedBitsHtml(model, ms.confirmed)}</div></div>`;
 }
 
 function buildVerdict(model, report) {
@@ -168,17 +179,22 @@ function buildVerdict(model, report) {
     const m = report.conflictKeys
       .map((c) => {
         const keyTxt = c.bits === 1 ? `旧密钥 ${model.keys[0]}` : c.bits === 2 ? `新密钥 ${model.keys[1]}` : `位掩码 ${c.bits}`;
-        return `${model.moduleIds[c.module]} 以 ${keyTxt}`;
+        const active = c.epoch === -1 ? '未激活' : `持久激活${c.epoch === 0 ? '旧' : '新'}密钥`;
+        const bind =
+          c.authzKey === -1
+            ? '该令无持久授权（沿用原签发规则）'
+            : `持久授权仅允许${c.authzKey === 0 ? '旧' : '新'}密钥 ${model.keys[c.authzKey]}`;
+        return `${model.moduleIds[c.module]} 以 ${keyTxt}确认（${active}；${bind}）`;
       })
       .join('，');
     div.innerHTML =
       `<div class="big">⚠ 发现违约：发布令 <span class="cid">${escapeHtml(report.conflictId)}</span> 被双模块以不同纪元密钥共同确认</div>
-       <div class="detail">${escapeHtml(m)}。以下交织动作数最短（${report.witnessActions.length} 步），同长度按（模块, 指令标识, 事件）稳定排序。</div>`;
+       <div class="detail">${escapeHtml(m)}。以下交织动作数最短（${report.witnessActions.length} 步），同长度按（模块, 指令标识, 事件）稳定排序；逐步表中可对照两模块的持久授权、持久激活与确认状态，区分未授权签发被阻止与不同纪元共同确认。</div>`;
   } else {
     div.className = 'verdict safe';
     div.innerHTML =
       '<div class="big">✓ 安全：穷尽全部保持控制端顺序的投递 / 断电 / 恢复交织，不存在跨纪元密钥共同确认</div>' +
-      `<div class="detail">已覆盖状态摘要见下，等价前缀已合并；所有断电恢复仅重放已落盘记录，迟到/重复确认不改变模块记录。</div>`;
+      `<div class="detail">已覆盖状态摘要见下，等价前缀已合并；授权仅在落盘后生效，恢复只重放落盘授权，未匹配持久授权的签发不能形成确认，迟到/重复确认不改变模块记录。</div>`;
   }
   return div;
 }
@@ -213,6 +229,8 @@ function instructionLabel(model, idx) {
   let arg = '';
   if (ins.op === 'prepare') arg = ins.arg === 0 ? model.keys[0] : model.keys[1];
   if (ins.op === 'issue') arg = model.idTable[ins.arg];
+  if (ins.op === 'authorize')
+    arg = `${model.idTable[ins.arg.id]} ${model.keys[ins.arg.key]}`;
   return `#${ins.idx} ${EVT_VERB[ins.op]} ${target}${arg ? ' ' + arg : ''}`;
 }
 
